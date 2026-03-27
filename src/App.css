@@ -1,0 +1,56 @@
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.status {
+  margin: 0;
+  color: #c6d0f5;
+}
+
+.card {
+  border: 1px solid #2c355b;
+  border-radius: 8px;
+  padding: 16px;
+  background: #0f162b;
+}
+
+.card h2 {
+  margin-top: 0;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+}
+
+input {
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #41507f;
+  background: #0a1124;
+  color: #f2f5ff;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+button {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  background: #4e6cf3;
+  color: #ffffff;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
