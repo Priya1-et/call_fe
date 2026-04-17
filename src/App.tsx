@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Invitation,
   Inviter,
@@ -10,7 +10,7 @@ import {
 } from 'sip.js';
 import './App.css';
 
-const defaultConfig = {
+const config = {
   apiBaseUrl: import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000',
   sipWebsocket: import.meta.env.VITE_SIP_WSS_URL ?? 'wss://pbx.example.com:8089/ws',
   sipDomain: import.meta.env.VITE_SIP_DOMAIN ?? 'pbx.example.com',
@@ -21,11 +21,26 @@ const defaultConfig = {
   turnPassword: import.meta.env.VITE_TURN_PASSWORD ?? 'webrtc-password',
 };
 
+const OUTGOING_NUMBERS = [
+  '0290178400',
+  '0290178401',
+  '0290178402',
+  '0290178426',
+];
+
+function formatAuNumber(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10 && digits.startsWith('02')) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)} ${digits.slice(6)}`;
+  }
+  return raw;
+}
+
 function App() {
-  const [consultant, setConsultant] = useState(defaultConfig.sipUsername);
+  const [outgoingNumber, setOutgoingNumber] = useState(OUTGOING_NUMBERS[0]);
   const [dialNumber, setDialNumber] = useState('');
   const [incomingNumber, setIncomingNumber] = useState('');
-  const [status, setStatus] = useState('Idle');
+  const [status, setStatus] = useState('Connecting...');
   const [isRegistered, setIsRegistered] = useState(false);
   const [dndEnabled, setDndEnabled] = useState(false);
   const [activeCallId, setActiveCallId] = useState<string>();
@@ -35,61 +50,69 @@ function App() {
   const activeSessionRef = useRef<Session | undefined>(undefined);
   const inboundInviteRef = useRef<Invitation | undefined>(undefined);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const registeredRef = useRef(false);
 
-  const consultantUri = useMemo(
-    () => UserAgent.makeURI(`sip:${consultant}@${defaultConfig.sipDomain}`),
-    [consultant],
-  );
+  const consultant = config.sipUsername;
+
+  // --- Helpers ---
 
   const bindMedia = (session: Session) => {
     const handler = session.sessionDescriptionHandler as {
       peerConnection?: RTCPeerConnection;
     };
-    const peerConnection = handler?.peerConnection;
-    const remoteAudio = remoteAudioRef.current;
-    if (!peerConnection || !remoteAudio) {
-      return;
-    }
-    const remoteStream = new MediaStream();
-    peerConnection.getReceivers().forEach((receiver) => {
-      if (receiver.track) {
-        remoteStream.addTrack(receiver.track);
-      }
+    const pc = handler?.peerConnection;
+    const audio = remoteAudioRef.current;
+    if (!pc || !audio) return;
+
+    const stream = new MediaStream();
+    pc.getReceivers().forEach((r) => {
+      if (r.track) stream.addTrack(r.track);
     });
-    remoteAudio.srcObject = remoteStream;
-    remoteAudio.play().catch(() => null);
+    audio.srcObject = stream;
+    audio.play().catch(() => null);
   };
 
-  const pushBackendEvent = async (
+  const pushEvent = async (
     eventType: 'inbound' | 'oncall' | 'disconnected' | 'DNDon' | 'DNDoff',
     payload: Record<string, unknown>,
   ) => {
-    await fetch(`${defaultConfig.apiBaseUrl}/v1/asterisk/events`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eventType, ...payload }),
-    });
+    try {
+      await fetch(`${config.apiBaseUrl}/v1/asterisk/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType, ...payload }),
+      });
+    } catch {
+      /* backend may be offline during dev */
+    }
   };
 
-  const attachSessionEvents = (session: Session, callId: string, phoneNumber: string) => {
-    session.stateChange.addListener((nextState) => {
-      if (nextState === SessionState.Establishing) {
-        setStatus('Call connecting...');
+  // --- Outbound call session tracking ---
+
+  const attachSessionEvents = (
+    session: Session,
+    callId: string,
+    phoneNumber: string,
+  ) => {
+    session.stateChange.addListener((state) => {
+      if (state === SessionState.Establishing) {
+        setStatus('Ringing...');
       }
-      if (nextState === SessionState.Established) {
+      if (state === SessionState.Established) {
         setStatus('Call active');
-        void pushBackendEvent('oncall', {
+        void pushEvent('oncall', {
           callId,
           consultant,
           phoneNumber,
+          outgoingNumber,
           direction: 'outbound',
           status: 'answered',
         });
         bindMedia(session);
       }
-      if (nextState === SessionState.Terminated) {
+      if (state === SessionState.Terminated) {
         setStatus('Call ended');
-        void pushBackendEvent('disconnected', {
+        void pushEvent('disconnected', {
           callId,
           consultant,
           phoneNumber,
@@ -101,112 +124,132 @@ function App() {
     });
   };
 
-  const registerConsultant = async () => {
-    if (!consultantUri) {
-      setStatus('Invalid consultant URI');
-      return;
-    }
-    try {
-      const userAgent = new UserAgent({
-        uri: consultantUri,
-        authorizationUsername: consultant,
-        authorizationPassword: defaultConfig.sipPassword,
-        transportOptions: { server: defaultConfig.sipWebsocket },
-        sessionDescriptionHandlerFactoryOptions: {
-          peerConnectionConfiguration: {
-            iceServers: [
-              {
-                urls: [defaultConfig.turnUrl],
-                username: defaultConfig.turnUsername,
-                credential: defaultConfig.turnPassword,
-              },
-            ],
+  // --- Auto-register on mount ---
+
+  useEffect(() => {
+    if (registeredRef.current) return;
+    registeredRef.current = true;
+
+    const register = async () => {
+      const uri = UserAgent.makeURI(
+        `sip:${consultant}@${config.sipDomain}`,
+      );
+      if (!uri) {
+        setStatus('Invalid SIP configuration');
+        return;
+      }
+
+      try {
+        const ua = new UserAgent({
+          uri,
+          authorizationUsername: consultant,
+          authorizationPassword: config.sipPassword,
+          transportOptions: { server: config.sipWebsocket },
+          sessionDescriptionHandlerFactoryOptions: {
+            peerConnectionConfiguration: {
+              iceServers: [
+                {
+                  urls: [config.turnUrl],
+                  username: config.turnUsername,
+                  credential: config.turnPassword,
+                },
+              ],
+            },
           },
-        },
-        delegate: {
-          onInvite: (invitation) => {
-            inboundInviteRef.current = invitation;
-            const caller = invitation.remoteIdentity.uri.user ?? 'unknown';
-            setIncomingNumber(caller);
-            setStatus(`Incoming call from ${caller}`);
-            const callId = crypto.randomUUID();
-            setActiveCallId(callId);
-            void pushBackendEvent('inbound', {
-              callId,
-              consultant,
-              phoneNumber: caller,
-              direction: 'inbound',
-              status: 'ringing',
-            });
-            invitation.stateChange.addListener((nextState) => {
-              if (nextState === SessionState.Established) {
-                setStatus('Incoming call active');
-                bindMedia(invitation);
-              }
-              if (nextState === SessionState.Terminated) {
-                setStatus('Incoming call ended');
-                void pushBackendEvent('disconnected', {
-                  callId,
-                  consultant,
-                  phoneNumber: caller,
-                  status: 'disconnected',
-                });
-                inboundInviteRef.current = undefined;
-                setIncomingNumber('');
-                setActiveCallId(undefined);
-              }
-            });
+          delegate: {
+            onInvite: handleIncomingCall,
           },
-        },
-      });
+        });
 
-      const registerer = new Registerer(userAgent);
-      await userAgent.start();
-      await registerer.register();
-      userAgentRef.current = userAgent;
-      registererRef.current = registerer;
-      setStatus('Registered and ready');
-      setIsRegistered(true);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown registration error';
-      setStatus(`Register failed: ${message}`);
-      setIsRegistered(false);
-    }
-  };
+        const reg = new Registerer(ua);
+        await ua.start();
+        await reg.register();
 
-  const unregisterConsultant = async () => {
-    const registerer = registererRef.current;
-    const userAgent = userAgentRef.current;
-    if (registerer) {
-      await registerer.unregister();
-    }
-    if (userAgent) {
-      await userAgent.stop();
-    }
-    setIsRegistered(false);
-    setStatus('Unregistered');
-  };
+        userAgentRef.current = ua;
+        registererRef.current = reg;
+        setIsRegistered(true);
+        setStatus('Ready');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Connection failed';
+        setStatus(`Offline: ${msg}`);
+        setIsRegistered(false);
+      }
+    };
 
-  const dial = async () => {
-    if (!isRegistered || !userAgentRef.current || !dialNumber) {
-      return;
-    }
-    const target = UserAgent.makeURI(`sip:${dialNumber}@${defaultConfig.sipDomain}`);
-    if (!target) {
-      setStatus('Invalid target number');
-      return;
-    }
+    register();
+
+    return () => {
+      registererRef.current?.unregister().catch(() => null);
+      userAgentRef.current?.stop().catch(() => null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Incoming call handler ---
+
+  function handleIncomingCall(invitation: Invitation) {
+    inboundInviteRef.current = invitation;
+    const caller = invitation.remoteIdentity.uri.user ?? 'unknown';
+    setIncomingNumber(caller);
+    setStatus(`Incoming call from ${caller}`);
+
     const callId = crypto.randomUUID();
     setActiveCallId(callId);
+
+    void pushEvent('inbound', {
+      callId,
+      consultant,
+      phoneNumber: caller,
+      direction: 'inbound',
+      status: 'ringing',
+    });
+
+    invitation.stateChange.addListener((state) => {
+      if (state === SessionState.Established) {
+        setStatus('Incoming call active');
+        bindMedia(invitation);
+      }
+      if (state === SessionState.Terminated) {
+        setStatus('Ready');
+        void pushEvent('disconnected', {
+          callId,
+          consultant,
+          phoneNumber: caller,
+          status: 'disconnected',
+        });
+        inboundInviteRef.current = undefined;
+        setIncomingNumber('');
+        setActiveCallId(undefined);
+      }
+    });
+  }
+
+  // --- Actions ---
+
+  const dial = async () => {
+    if (!isRegistered || !userAgentRef.current || !dialNumber.trim()) return;
+
+    const target = UserAgent.makeURI(
+      `sip:${dialNumber}@${config.sipDomain}`,
+    );
+    if (!target) {
+      setStatus('Invalid phone number');
+      return;
+    }
+
+    const callId = crypto.randomUUID();
+    setActiveCallId(callId);
+
     const inviter = new Inviter(userAgentRef.current, target as URI);
     activeSessionRef.current = inviter;
     attachSessionEvents(inviter, callId, dialNumber);
-    setStatus(`Dialing ${dialNumber}`);
-    await pushBackendEvent('oncall', {
+
+    setStatus(`Dialing ${dialNumber}...`);
+    await pushEvent('oncall', {
       callId,
       consultant,
       phoneNumber: dialNumber,
+      outgoingNumber,
       direction: 'outbound',
       status: 'ringing',
     });
@@ -214,99 +257,130 @@ function App() {
   };
 
   const answer = async () => {
-    if (!inboundInviteRef.current) {
-      return;
-    }
+    if (!inboundInviteRef.current) return;
     await inboundInviteRef.current.accept();
   };
 
   const reject = async () => {
-    if (!inboundInviteRef.current) {
-      return;
-    }
+    if (!inboundInviteRef.current) return;
     await inboundInviteRef.current.reject();
-    setStatus('Incoming call rejected');
+    setStatus('Ready');
   };
 
   const hangup = async () => {
     const session = activeSessionRef.current ?? inboundInviteRef.current;
-    if (!session) {
-      return;
-    }
+    if (!session) return;
+
     if (session.state === SessionState.Established) {
       await session.bye();
-      return;
-    }
-    if (session instanceof Inviter) {
+    } else if (session instanceof Inviter) {
       await session.cancel();
-      return;
-    }
-    if (session instanceof Invitation) {
+    } else if (session instanceof Invitation) {
       await session.reject();
     }
   };
 
   const toggleDnd = async () => {
-    const nextValue = !dndEnabled;
-    setDndEnabled(nextValue);
-    await fetch(`${defaultConfig.apiBaseUrl}/v1/dnd/${consultant}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: nextValue }),
-    });
-    await pushBackendEvent(nextValue ? 'DNDon' : 'DNDoff', { consultant });
-    setStatus(nextValue ? 'DND enabled' : 'DND disabled');
+    const next = !dndEnabled;
+    setDndEnabled(next);
+    try {
+      await fetch(`${config.apiBaseUrl}/v1/dnd/${consultant}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+    } catch {
+      /* backend may be offline */
+    }
+    await pushEvent(next ? 'DNDon' : 'DNDoff', { consultant });
+    setStatus(next ? 'DND enabled' : 'Ready');
   };
+
+  const isOnCall = !!activeCallId;
+
+  // --- UI ---
 
   return (
     <main className="app">
       <h1>Web Calling Console</h1>
-      <p className="status">Status: {status}</p>
+
+      <div className="status-bar">
+        <span className={`status-dot ${isRegistered ? 'online' : 'offline'}`} />
+        <span className="status-text">{status}</span>
+        <span className="consultant-name">{consultant}</span>
+      </div>
 
       <section className="card">
-        <h2>Consultant</h2>
-        <label>
-          Username
-          <input value={consultant} onChange={(event) => setConsultant(event.target.value)} />
-        </label>
-        <div className="actions">
-          <button onClick={registerConsultant} disabled={isRegistered}>
-            Register
-          </button>
-          <button onClick={unregisterConsultant} disabled={!isRegistered}>
-            Unregister
-          </button>
-          <button onClick={toggleDnd} disabled={!isRegistered}>
-            {dndEnabled ? 'Disable DND' : 'Enable DND'}
-          </button>
-        </div>
-      </section>
+        <h2>Make a Call</h2>
 
-      <section className="card">
-        <h2>Outgoing</h2>
         <label>
-          Number
-          <input value={dialNumber} onChange={(event) => setDialNumber(event.target.value)} />
+          Call from
+          <select
+            value={outgoingNumber}
+            onChange={(e) => setOutgoingNumber(e.target.value)}
+            disabled={isOnCall}
+          >
+            {OUTGOING_NUMBERS.map((num) => (
+              <option key={num} value={num}>
+                {formatAuNumber(num)}
+              </option>
+            ))}
+          </select>
         </label>
+
+        <label>
+          Call to
+          <input
+            type="tel"
+            placeholder="e.g. 0414313767"
+            value={dialNumber}
+            onChange={(e) => setDialNumber(e.target.value)}
+            disabled={isOnCall}
+          />
+        </label>
+
         <div className="actions">
-          <button onClick={dial} disabled={!isRegistered}>
+          <button
+            className="btn-dial"
+            onClick={dial}
+            disabled={!isRegistered || isOnCall || !dialNumber.trim()}
+          >
             Dial
           </button>
-          <button onClick={hangup} disabled={!activeCallId}>
+          <button
+            className="btn-hangup"
+            onClick={hangup}
+            disabled={!isOnCall}
+          >
             Hangup
           </button>
         </div>
       </section>
 
-      <section className="card">
-        <h2>Incoming</h2>
-        <p>Caller: {incomingNumber || 'No incoming call'}</p>
-        <div className="actions">
-          <button onClick={answer} disabled={!incomingNumber}>
-            Accept
-          </button>
-          <button onClick={reject} disabled={!incomingNumber}>
-            Reject
+      {incomingNumber && (
+        <section className="card card-incoming">
+          <h2>Incoming Call</h2>
+          <p className="caller-id">{formatAuNumber(incomingNumber)}</p>
+          <div className="actions">
+            <button className="btn-accept" onClick={answer}>
+              Accept
+            </button>
+            <button className="btn-reject" onClick={reject}>
+              Reject
+            </button>
+          </div>
+        </section>
+      )}
+
+      <section className="card card-dnd">
+        <div className="dnd-row">
+          <span>Do Not Disturb</span>
+          <button
+            className={dndEnabled ? 'btn-dnd-on' : 'btn-dnd-off'}
+            onClick={toggleDnd}
+            disabled={!isRegistered}
+          >
+            {dndEnabled ? 'ON' : 'OFF'}
           </button>
         </div>
       </section>

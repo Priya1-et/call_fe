@@ -1,15 +1,57 @@
 .app {
-  max-width: 900px;
+  max-width: 480px;
   margin: 0 auto;
   padding: 24px;
   display: grid;
   gap: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-.status {
-  margin: 0;
-  color: #c6d0f5;
+h1 {
+  margin: 0 0 4px;
+  font-size: 1.4rem;
 }
+
+/* Status bar */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #0f162b;
+  border: 1px solid #2c355b;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background: #34d399;
+}
+
+.status-dot.offline {
+  background: #f87171;
+}
+
+.status-text {
+  flex: 1;
+  color: #c6d0f5;
+  font-size: 0.9rem;
+}
+
+.consultant-name {
+  color: #8b9cf7;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+/* Cards */
 
 .card {
   border: 1px solid #2c355b;
@@ -19,38 +61,127 @@
 }
 
 .card h2 {
-  margin-top: 0;
+  margin: 0 0 12px;
+  font-size: 1.1rem;
 }
+
+.card-incoming {
+  border-color: #4e6cf3;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { border-color: #4e6cf3; }
+  50% { border-color: #8b9cf7; }
+}
+
+.caller-id {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: #f2f5ff;
+}
+
+/* Form elements */
 
 label {
   display: grid;
-  gap: 8px;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: #8b9cf7;
 }
 
-input {
+input,
+select {
   padding: 10px;
   border-radius: 6px;
   border: 1px solid #41507f;
   background: #0a1124;
   color: #f2f5ff;
+  font-size: 1rem;
 }
+
+select {
+  cursor: pointer;
+}
+
+input::placeholder {
+  color: #5a6a9a;
+}
+
+/* Buttons */
 
 .actions {
   display: flex;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 4px;
 }
 
 button {
   border: none;
   border-radius: 6px;
-  padding: 8px 12px;
+  padding: 10px 16px;
   cursor: pointer;
-  background: #4e6cf3;
-  color: #ffffff;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: opacity 0.15s;
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: 0.4;
+}
+
+.btn-dial {
+  background: #34d399;
+  color: #0a1124;
+  flex: 1;
+}
+
+.btn-hangup {
+  background: #f87171;
+  color: #ffffff;
+  flex: 1;
+}
+
+.btn-accept {
+  background: #34d399;
+  color: #0a1124;
+  flex: 1;
+}
+
+.btn-reject {
+  background: #f87171;
+  color: #ffffff;
+  flex: 1;
+}
+
+/* DND */
+
+.card-dnd {
+  padding: 12px 16px;
+}
+
+.dnd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dnd-row span {
+  font-size: 0.9rem;
+  color: #c6d0f5;
+}
+
+.btn-dnd-off {
+  background: #2c355b;
+  color: #c6d0f5;
+  min-width: 50px;
+}
+
+.btn-dnd-on {
+  background: #f59e0b;
+  color: #0a1124;
+  min-width: 50px;
 }
