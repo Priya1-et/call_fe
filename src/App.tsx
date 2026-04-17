@@ -253,7 +253,11 @@ function App() {
       direction: 'outbound',
       status: 'ringing',
     });
-    await inviter.invite();
+    await inviter.invite({
+      requestOptions: {
+        extraHeaders: [`X-Outgoing-Number: ${outgoingNumber}`],
+      },
+    });
   };
 
   const answer = async () => {
