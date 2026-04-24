@@ -3,6 +3,7 @@ import {
   Invitation,
   Inviter,
   Registerer,
+  RegistererState,
   Session,
   SessionState,
   UserAgent,
@@ -54,6 +55,14 @@ function App() {
 
   const consultant = config.sipUsername;
 
+  const log = (...args: unknown[]) => {
+    console.log('[WebCalling]', ...args);
+  };
+
+  const logError = (...args: unknown[]) => {
+    console.error('[WebCalling]', ...args);
+  };
+
   // --- Helpers ---
 
   const bindMedia = (session: Session) => {
@@ -95,6 +104,12 @@ function App() {
     phoneNumber: string,
   ) => {
     session.stateChange.addListener((state) => {
+      log('Call state changed', {
+        callId,
+        phoneNumber,
+        outgoingNumber,
+        state: SessionState[state],
+      });
       if (state === SessionState.Establishing) {
         setStatus('Ringing...');
       }
@@ -131,10 +146,22 @@ function App() {
     registeredRef.current = true;
 
     const register = async () => {
+      log('Boot config', {
+        apiBaseUrl: config.apiBaseUrl,
+        sipWebsocket: config.sipWebsocket,
+        sipDomain: config.sipDomain,
+        sipUsername: config.sipUsername,
+        turnUrl: config.turnUrl,
+      });
+
       const uri = UserAgent.makeURI(
         `sip:${consultant}@${config.sipDomain}`,
       );
       if (!uri) {
+        logError('Invalid SIP URI from config', {
+          consultant,
+          sipDomain: config.sipDomain,
+        });
         setStatus('Invalid SIP configuration');
         return;
       }
@@ -157,20 +184,51 @@ function App() {
             },
           },
           delegate: {
+            onConnect: () => {
+              log('WebSocket connected', { server: config.sipWebsocket });
+              setStatus('Socket connected');
+            },
+            onDisconnect: (error) => {
+              logError('WebSocket disconnected', {
+                server: config.sipWebsocket,
+                error:
+                  error instanceof Error ? error.message : String(error ?? ''),
+              });
+              setIsRegistered(false);
+              setStatus('Socket disconnected');
+            },
             onInvite: handleIncomingCall,
           },
         });
 
         const reg = new Registerer(ua);
+        reg.stateChange.addListener((state) => {
+          log('Registerer state changed', { state: RegistererState[state] });
+          if (state === RegistererState.Registered) {
+            setIsRegistered(true);
+            setStatus('Socket connected, registered');
+          }
+          if (state === RegistererState.Unregistered) {
+            setIsRegistered(false);
+            setStatus('Socket connected, registration failed');
+          }
+        });
+        log('Starting SIP user agent');
         await ua.start();
+        log('SIP user agent started; registering consultant');
+        setStatus('Socket connected, registering...');
         await reg.register();
+        log('SIP registration successful', { consultant });
 
         userAgentRef.current = ua;
         registererRef.current = reg;
-        setIsRegistered(true);
-        setStatus('Ready');
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Connection failed';
+        logError('SIP registration failed', {
+          consultant,
+          sipWebsocket: config.sipWebsocket,
+          message: msg,
+        });
         setStatus(`Offline: ${msg}`);
         setIsRegistered(false);
       }
@@ -201,6 +259,7 @@ function App() {
   function handleIncomingCall(invitation: Invitation) {
     inboundInviteRef.current = invitation;
     const caller = invitation.remoteIdentity.uri.user ?? 'unknown';
+    log('Incoming invite received', { caller, consultant });
     setIncomingNumber(caller);
     setStatus(`Incoming call from ${caller}`);
 
@@ -244,6 +303,7 @@ function App() {
       `sip:${dialNumber}@${config.sipDomain}`,
     );
     if (!target) {
+      logError('Dial target URI invalid', { dialNumber, sipDomain: config.sipDomain });
       setStatus('Invalid phone number');
       return;
     }
@@ -252,6 +312,12 @@ function App() {
     setActiveCallId(callId);
 
     const inviter = new Inviter(userAgentRef.current, target as URI);
+    log('Dialing outbound', {
+      callId,
+      dialNumber,
+      outgoingNumber,
+      target: target.toString(),
+    });
     activeSessionRef.current = inviter;
     attachSessionEvents(inviter, callId, dialNumber);
 
@@ -273,11 +339,13 @@ function App() {
 
   const answer = async () => {
     if (!inboundInviteRef.current) return;
+    log('Answering incoming call');
     await inboundInviteRef.current.accept();
   };
 
   const reject = async () => {
     if (!inboundInviteRef.current) return;
+    log('Rejecting incoming call');
     await inboundInviteRef.current.reject();
     setStatus('Ready');
   };
@@ -287,16 +355,20 @@ function App() {
     if (!session) return;
 
     if (session.state === SessionState.Established) {
+      log('Hanging up established call');
       await session.bye();
     } else if (session instanceof Inviter) {
+      log('Cancelling outbound call before answer');
       await session.cancel();
     } else if (session instanceof Invitation) {
+      log('Rejecting inbound call before answer');
       await session.reject();
     }
   };
 
   const toggleDnd = async () => {
     const next = !dndEnabled;
+    log('Toggling DND', { consultant, enabled: next });
     setDndEnabled(next);
     try {
       await fetch(`${config.apiBaseUrl}/v1/dnd/${consultant}`, {
@@ -305,6 +377,7 @@ function App() {
         body: JSON.stringify({ enabled: next }),
       });
     } catch {
+      logError('DND backend update failed', { consultant, enabled: next });
       /* backend may be offline */
     }
     await pushEvent(next ? 'DNDon' : 'DNDoff', { consultant });
