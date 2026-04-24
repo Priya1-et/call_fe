@@ -106,6 +106,63 @@ select {
   cursor: pointer;
 }
 
+/* Custom dropdown for large outgoing number list */
+
+.dropdown {
+  position: relative;
+}
+
+.dropdown-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #41507f;
+  background: #0a1124;
+  color: #f2f5ff;
+  font-size: 1rem;
+}
+
+.dropdown-caret {
+  color: #8b9cf7;
+  margin-left: 8px;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #41507f;
+  border-radius: 6px;
+  background: #0a1124;
+  z-index: 30;
+  padding: 4px;
+  margin: 0;
+  list-style: none;
+}
+
+.dropdown-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: transparent;
+  color: #f2f5ff;
+}
+
+.dropdown-item.selected {
+  background: #2c4ea4;
+}
+
+.dropdown-item:hover {
+  background: #1c2e66;
+}
+
 input::placeholder {
   color: #5a6a9a;
 }
@@ -185,3 +242,4 @@ button:disabled {
   color: #0a1124;
   min-width: 50px;
 }
+

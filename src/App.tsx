@@ -21,12 +21,10 @@ const config = {
   turnPassword: import.meta.env.VITE_TURN_PASSWORD ?? 'webrtc-password',
 };
 
-const OUTGOING_NUMBERS = [
-  '0290178400',
-  '0290178401',
-  '0290178402',
-  '0290178426',
-];
+const OUTGOING_NUMBERS = Array.from(
+  { length: 100 },
+  (_, i) => `02901784${String(i).padStart(2, '0')}`,
+);
 
 function formatAuNumber(raw: string): string {
   const digits = raw.replace(/\D/g, '');
@@ -44,6 +42,7 @@ function App() {
   const [isRegistered, setIsRegistered] = useState(false);
   const [dndEnabled, setDndEnabled] = useState(false);
   const [activeCallId, setActiveCallId] = useState<string>();
+  const [isOutgoingMenuOpen, setIsOutgoingMenuOpen] = useState(false);
 
   const userAgentRef = useRef<UserAgent | undefined>(undefined);
   const registererRef = useRef<Registerer | undefined>(undefined);
@@ -51,6 +50,7 @@ function App() {
   const inboundInviteRef = useRef<Invitation | undefined>(undefined);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const registeredRef = useRef(false);
+  const outgoingMenuRef = useRef<HTMLDivElement>(null);
 
   const consultant = config.sipUsername;
 
@@ -183,6 +183,17 @@ function App() {
       userAgentRef.current?.stop().catch(() => null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (!outgoingMenuRef.current) return;
+      if (!outgoingMenuRef.current.contains(event.target as Node)) {
+        setIsOutgoingMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
   // --- Incoming call handler ---
@@ -319,17 +330,35 @@ function App() {
 
         <label>
           Call from
-          <select
-            value={outgoingNumber}
-            onChange={(e) => setOutgoingNumber(e.target.value)}
-            disabled={isOnCall}
-          >
-            {OUTGOING_NUMBERS.map((num) => (
-              <option key={num} value={num}>
-                {formatAuNumber(num)}
-              </option>
-            ))}
-          </select>
+          <div className="dropdown" ref={outgoingMenuRef}>
+            <button
+              type="button"
+              className="dropdown-trigger"
+              onClick={() => setIsOutgoingMenuOpen((open) => !open)}
+              disabled={isOnCall}
+            >
+              <span>{formatAuNumber(outgoingNumber)}</span>
+              <span className="dropdown-caret">▾</span>
+            </button>
+            {isOutgoingMenuOpen && (
+              <ul className="dropdown-menu">
+                {OUTGOING_NUMBERS.map((num) => (
+                  <li key={num}>
+                    <button
+                      type="button"
+                      className={`dropdown-item ${num === outgoingNumber ? 'selected' : ''}`}
+                      onClick={() => {
+                        setOutgoingNumber(num);
+                        setIsOutgoingMenuOpen(false);
+                      }}
+                    >
+                      {formatAuNumber(num)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </label>
 
         <label>
