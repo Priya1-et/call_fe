@@ -44,6 +44,8 @@ function App() {
   const [dndEnabled, setDndEnabled] = useState(false);
   const [activeCallId, setActiveCallId] = useState<string>();
   const [isOutgoingMenuOpen, setIsOutgoingMenuOpen] = useState(false);
+  const [micStatus, setMicStatus] = useState<'unknown' | 'ok' | 'fail'>('unknown');
+  const [micDeviceLabel, setMicDeviceLabel] = useState<string>('');
 
   const userAgentRef = useRef<UserAgent | undefined>(undefined);
   const registererRef = useRef<Registerer | undefined>(undefined);
@@ -55,12 +57,51 @@ function App() {
 
   const consultant = config.sipUsername;
 
-  const log = (...args: unknown[]) => {
-    console.log('[WebCalling]', ...args);
+  const log = (step: string, data?: unknown) => {
+    if (data !== undefined) {
+      console.log(`[WebCalling] [${step}]`, data);
+    } else {
+      console.log(`[WebCalling] [${step}]`);
+    }
   };
 
-  const logError = (...args: unknown[]) => {
-    console.error('[WebCalling]', ...args);
+  const logError = (step: string, data?: unknown) => {
+    if (data !== undefined) {
+      console.error(`[WebCalling] [${step}] ❌`, data);
+    } else {
+      console.error(`[WebCalling] [${step}] ❌`);
+    }
+  };
+
+  const testMicrophone = async (): Promise<{ ok: boolean; label?: string; error?: string }> => {
+    log('MIC.test.start');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      logError('MIC.test.unsupported', 'navigator.mediaDevices.getUserMedia not available');
+      return { ok: false, error: 'getUserMedia not supported' };
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+      log('MIC.test.devices', {
+        total: devices.length,
+        audioInputs: audioInputs.length,
+        labels: audioInputs.map((d) => d.label || '(label hidden until permission granted)'),
+      });
+      if (audioInputs.length === 0) {
+        logError('MIC.test.no-devices', 'No audio input devices enumerated');
+        return { ok: false, error: 'No audio input device found' };
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const track = stream.getAudioTracks()[0];
+      const label = track?.label ?? 'unknown';
+      log('MIC.test.success', { label, settings: track?.getSettings() });
+      stream.getTracks().forEach((t) => t.stop());
+      return { ok: true, label };
+    } catch (err) {
+      const e = err as DOMException;
+      logError('MIC.test.failed', { name: e.name, message: e.message });
+      return { ok: false, error: `${e.name}: ${e.message}` };
+    }
   };
 
   // --- Helpers ---
@@ -85,14 +126,26 @@ function App() {
     eventType: 'inbound' | 'oncall' | 'disconnected' | 'DNDon' | 'DNDoff',
     payload: Record<string, unknown>,
   ) => {
+    const url = `${config.apiBaseUrl}/v1/asterisk/events`;
+    log('API.event.send', { url, eventType, payload });
     try {
-      await fetch(`${config.apiBaseUrl}/v1/asterisk/events`, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventType, ...payload }),
       });
-    } catch {
-      /* backend may be offline during dev */
+      log('API.event.response', {
+        url,
+        status: res.status,
+        ok: res.ok,
+        statusText: res.statusText,
+      });
+    } catch (err) {
+      logError('API.event.error', {
+        url,
+        eventType,
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   };
 
@@ -104,7 +157,7 @@ function App() {
     phoneNumber: string,
   ) => {
     session.stateChange.addListener((state) => {
-      log('Call state changed', {
+      log('SIP.session.state', {
         callId,
         phoneNumber,
         outgoingNumber,
@@ -115,6 +168,7 @@ function App() {
       }
       if (state === SessionState.Established) {
         setStatus('Call active');
+        log('SIP.session.established', { callId });
         void pushEvent('oncall', {
           callId,
           consultant,
@@ -127,6 +181,7 @@ function App() {
       }
       if (state === SessionState.Terminated) {
         setStatus('Call ended');
+        log('SIP.session.terminated', { callId });
         void pushEvent('disconnected', {
           callId,
           consultant,
@@ -146,7 +201,7 @@ function App() {
     registeredRef.current = true;
 
     const register = async () => {
-      log('Boot config', {
+      log('BOOT.config', {
         apiBaseUrl: config.apiBaseUrl,
         sipWebsocket: config.sipWebsocket,
         sipDomain: config.sipDomain,
@@ -158,13 +213,14 @@ function App() {
         `sip:${consultant}@${config.sipDomain}`,
       );
       if (!uri) {
-        logError('Invalid SIP URI from config', {
+        logError('BOOT.uri.invalid', {
           consultant,
           sipDomain: config.sipDomain,
         });
         setStatus('Invalid SIP configuration');
         return;
       }
+      log('BOOT.uri.built', { uri: uri.toString() });
 
       try {
         const ua = new UserAgent({
@@ -185,11 +241,11 @@ function App() {
           },
           delegate: {
             onConnect: () => {
-              log('WebSocket connected', { server: config.sipWebsocket });
+              log('SIP.ws.connected', { server: config.sipWebsocket });
               setStatus('Socket connected');
             },
             onDisconnect: (error) => {
-              logError('WebSocket disconnected', {
+              logError('SIP.ws.disconnected', {
                 server: config.sipWebsocket,
                 error:
                   error instanceof Error ? error.message : String(error ?? ''),
@@ -200,10 +256,11 @@ function App() {
             onInvite: handleIncomingCall,
           },
         });
+        log('SIP.userAgent.created');
 
         const reg = new Registerer(ua);
         reg.stateChange.addListener((state) => {
-          log('Registerer state changed', { state: RegistererState[state] });
+          log('SIP.registerer.state', { state: RegistererState[state] });
           if (state === RegistererState.Registered) {
             setIsRegistered(true);
             setStatus('Socket connected, registered');
@@ -213,18 +270,18 @@ function App() {
             setStatus('Socket connected, registration failed');
           }
         });
-        log('Starting SIP user agent');
+        log('SIP.userAgent.starting');
         await ua.start();
-        log('SIP user agent started; registering consultant');
+        log('SIP.userAgent.started');
         setStatus('Socket connected, registering...');
         await reg.register();
-        log('SIP registration successful', { consultant });
+        log('SIP.register.success', { consultant });
 
         userAgentRef.current = ua;
         registererRef.current = reg;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Connection failed';
-        logError('SIP registration failed', {
+        logError('SIP.register.failed', {
           consultant,
           sipWebsocket: config.sipWebsocket,
           message: msg,
@@ -254,12 +311,21 @@ function App() {
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
+  useEffect(() => {
+    log('BOOT.mic.preflight');
+    void testMicrophone().then((result) => {
+      setMicStatus(result.ok ? 'ok' : 'fail');
+      if (result.ok && result.label) setMicDeviceLabel(result.label);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- Incoming call handler ---
 
   function handleIncomingCall(invitation: Invitation) {
     inboundInviteRef.current = invitation;
     const caller = invitation.remoteIdentity.uri.user ?? 'unknown';
-    log('Incoming invite received', { caller, consultant });
+    log('INBOUND.invite.received', { caller, consultant });
     setIncomingNumber(caller);
     setStatus(`Incoming call from ${caller}`);
 
@@ -275,6 +341,11 @@ function App() {
     });
 
     invitation.stateChange.addListener((state) => {
+      log('INBOUND.session.state', {
+        callId,
+        caller,
+        state: SessionState[state],
+      });
       if (state === SessionState.Established) {
         setStatus('Incoming call active');
         bindMedia(invitation);
@@ -297,27 +368,53 @@ function App() {
   // --- Actions ---
 
   const dial = async () => {
-    if (!isRegistered || !userAgentRef.current || !dialNumber.trim()) return;
+    log('DIAL.click', { dialNumber, outgoingNumber, isRegistered });
+
+    if (!isRegistered) {
+      logError('DIAL.not-registered', 'SIP not registered yet');
+      setStatus('Not registered');
+      return;
+    }
+    if (!userAgentRef.current) {
+      logError('DIAL.no-user-agent', 'UserAgent missing');
+      return;
+    }
+    if (!dialNumber.trim()) {
+      logError('DIAL.empty-number');
+      return;
+    }
+
+    log('DIAL.preflight.mic.start');
+    const mic = await testMicrophone();
+    if (!mic.ok) {
+      logError('DIAL.preflight.mic.failed', mic.error);
+      setStatus(`Microphone error: ${mic.error}`);
+      setMicStatus('fail');
+      return;
+    }
+    setMicStatus('ok');
+    setMicDeviceLabel(mic.label ?? '');
+    log('DIAL.preflight.mic.passed', { device: mic.label });
 
     const target = UserAgent.makeURI(
       `sip:${dialNumber}@${config.sipDomain}`,
     );
     if (!target) {
-      logError('Dial target URI invalid', { dialNumber, sipDomain: config.sipDomain });
+      logError('DIAL.uri.invalid', {
+        dialNumber,
+        sipDomain: config.sipDomain,
+      });
       setStatus('Invalid phone number');
       return;
     }
+    log('DIAL.uri.built', { target: target.toString() });
 
     const callId = crypto.randomUUID();
     setActiveCallId(callId);
+    log('DIAL.callId.assigned', { callId });
 
     const inviter = new Inviter(userAgentRef.current, target as URI);
-    log('Dialing outbound', {
-      callId,
-      dialNumber,
-      outgoingNumber,
-      target: target.toString(),
-    });
+    log('DIAL.inviter.created', { callId, dialNumber, outgoingNumber });
     activeSessionRef.current = inviter;
     attachSessionEvents(inviter, callId, dialNumber);
 
@@ -330,22 +427,40 @@ function App() {
       direction: 'outbound',
       status: 'ringing',
     });
-    await inviter.invite({
-      requestOptions: {
-        extraHeaders: [`X-Outgoing-Number: ${outgoingNumber}`],
-      },
+
+    log('DIAL.invite.sending', {
+      callId,
+      target: target.toString(),
+      headers: { 'X-Outgoing-Number': outgoingNumber },
     });
+    try {
+      await inviter.invite({
+        requestOptions: {
+          extraHeaders: [`X-Outgoing-Number: ${outgoingNumber}`],
+        },
+      });
+      log('DIAL.invite.sent', { callId });
+    } catch (err) {
+      const e = err as Error;
+      logError('DIAL.invite.failed', {
+        callId,
+        name: e.name,
+        message: e.message,
+      });
+      setStatus(`Call failed: ${e.message}`);
+    }
   };
 
   const answer = async () => {
     if (!inboundInviteRef.current) return;
-    log('Answering incoming call');
+    log('INBOUND.answer.click');
     await inboundInviteRef.current.accept();
+    log('INBOUND.answer.accepted');
   };
 
   const reject = async () => {
     if (!inboundInviteRef.current) return;
-    log('Rejecting incoming call');
+    log('INBOUND.reject.click');
     await inboundInviteRef.current.reject();
     setStatus('Ready');
   };
@@ -355,30 +470,36 @@ function App() {
     if (!session) return;
 
     if (session.state === SessionState.Established) {
-      log('Hanging up established call');
+      log('HANGUP.bye.established');
       await session.bye();
     } else if (session instanceof Inviter) {
-      log('Cancelling outbound call before answer');
+      log('HANGUP.cancel.outbound');
       await session.cancel();
     } else if (session instanceof Invitation) {
-      log('Rejecting inbound call before answer');
+      log('HANGUP.reject.inbound');
       await session.reject();
     }
   };
 
   const toggleDnd = async () => {
     const next = !dndEnabled;
-    log('Toggling DND', { consultant, enabled: next });
+    log('DND.toggle.click', { consultant, enabled: next });
     setDndEnabled(next);
+    const url = `${config.apiBaseUrl}/v1/dnd/${consultant}`;
     try {
-      await fetch(`${config.apiBaseUrl}/v1/dnd/${consultant}`, {
+      const res = await fetch(url, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: next }),
       });
-    } catch {
-      logError('DND backend update failed', { consultant, enabled: next });
-      /* backend may be offline */
+      log('DND.api.response', { url, status: res.status, ok: res.ok });
+    } catch (err) {
+      logError('DND.api.error', {
+        url,
+        consultant,
+        enabled: next,
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
     await pushEvent(next ? 'DNDon' : 'DNDoff', { consultant });
     setStatus(next ? 'DND enabled' : 'Ready');
@@ -396,6 +517,29 @@ function App() {
         <span className={`status-dot ${isRegistered ? 'online' : 'offline'}`} />
         <span className="status-text">{status}</span>
         <span className="consultant-name">{consultant}</span>
+      </div>
+
+      <div className="mic-bar">
+        <span className={`mic-dot mic-${micStatus}`} />
+        <span className="mic-text">
+          Microphone:{' '}
+          {micStatus === 'ok'
+            ? `OK (${micDeviceLabel || 'detected'})`
+            : micStatus === 'fail'
+              ? 'Not available'
+              : 'Checking...'}
+        </span>
+        <button
+          type="button"
+          className="btn-test-mic"
+          onClick={async () => {
+            const r = await testMicrophone();
+            setMicStatus(r.ok ? 'ok' : 'fail');
+            setMicDeviceLabel(r.ok ? r.label ?? '' : r.error ?? '');
+          }}
+        >
+          Test Mic
+        </button>
       </div>
 
       <section className="card">

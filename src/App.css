@@ -51,6 +51,50 @@ h1 {
   font-size: 0.85rem;
 }
 
+/* Mic bar */
+
+.mic-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #0f162b;
+  border: 1px solid #2c355b;
+  font-size: 0.85rem;
+}
+
+.mic-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mic-ok {
+  background: #34d399;
+}
+
+.mic-fail {
+  background: #f87171;
+}
+
+.mic-unknown {
+  background: #8b9cf7;
+}
+
+.mic-text {
+  flex: 1;
+  color: #c6d0f5;
+}
+
+.btn-test-mic {
+  background: #2c355b;
+  color: #c6d0f5;
+  font-size: 0.8rem;
+  padding: 6px 12px;
+}
+
 /* Cards */
 
 .card {
