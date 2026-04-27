@@ -478,7 +478,7 @@ function App() {
         </section>
       )}
 
-      <section className="card card-dnd">
+      {/* <section className="card card-dnd">
         <div className="dnd-row">
           <span>Do Not Disturb</span>
           <button
@@ -489,7 +489,7 @@ function App() {
             {dndEnabled ? 'ON' : 'OFF'}
           </button>
         </div>
-      </section>
+      </section> */}
 
       <audio ref={remoteAudioRef} autoPlay />
     </main>
