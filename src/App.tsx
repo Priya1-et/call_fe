@@ -55,6 +55,20 @@ function App() {
   const registeredRef = useRef(false);
   const outgoingMenuRef = useRef<HTMLDivElement>(null);
 
+  // Per-call tracking: who hung up + last SIP response details
+  const callMetaRef = useRef<
+    Map<
+      string,
+      {
+        localHangup: boolean;
+        sipCode?: number;
+        sipReason?: string;
+        answered: boolean;
+        finalised: boolean;
+      }
+    >
+  >(new Map());
+
   const consultant = config.sipUsername;
 
   const log = (step: string, data?: unknown) => {
@@ -167,6 +181,8 @@ function App() {
         setStatus('Ringing...');
       }
       if (state === SessionState.Established) {
+        const meta = callMetaRef.current.get(callId);
+        if (meta) meta.answered = true;
         setStatus('Call active');
         log('SIP.session.established', { callId });
         void pushEvent('oncall', {
@@ -182,12 +198,41 @@ function App() {
       if (state === SessionState.Terminated) {
         setStatus('Call ended');
         log('SIP.session.terminated', { callId });
-        void pushEvent('disconnected', {
-          callId,
-          consultant,
-          phoneNumber,
-          status: 'disconnected',
-        });
+
+        const meta = callMetaRef.current.get(callId) ?? {
+          localHangup: false,
+          answered: false,
+          finalised: false,
+        };
+
+        // Don't push duplicate disconnected if we already pushed a 'failed' event
+        if (!meta.finalised) {
+          meta.finalised = true;
+          let endReason: 'local_hangup' | 'remote_hangup' | 'no_answer' | 'failed';
+          if (meta.answered) {
+            endReason = meta.localHangup ? 'local_hangup' : 'remote_hangup';
+          } else if (meta.sipCode && meta.sipCode >= 400) {
+            endReason = 'failed';
+          } else if (meta.localHangup) {
+            endReason = 'local_hangup';
+          } else {
+            endReason = 'no_answer';
+          }
+
+          void pushEvent('disconnected', {
+            callId,
+            consultant,
+            phoneNumber,
+            outgoingNumber,
+            direction: 'outbound',
+            status: meta.answered ? 'disconnected' : meta.sipCode ? 'failed' : 'missed',
+            endReason,
+            sipResponseCode: meta.sipCode,
+            sipResponseReason: meta.sipReason,
+          });
+        }
+
+        callMetaRef.current.delete(callId);
         activeSessionRef.current = undefined;
         setActiveCallId(undefined);
       }
@@ -332,6 +377,12 @@ function App() {
     const callId = crypto.randomUUID();
     setActiveCallId(callId);
 
+    callMetaRef.current.set(callId, {
+      localHangup: false,
+      answered: false,
+      finalised: false,
+    });
+
     void pushEvent('inbound', {
       callId,
       consultant,
@@ -347,17 +398,43 @@ function App() {
         state: SessionState[state],
       });
       if (state === SessionState.Established) {
+        const meta = callMetaRef.current.get(callId);
+        if (meta) meta.answered = true;
+        void pushEvent('oncall', {
+          callId,
+          consultant,
+          phoneNumber: caller,
+          direction: 'inbound',
+          status: 'answered',
+        });
         setStatus('Incoming call active');
         bindMedia(invitation);
       }
       if (state === SessionState.Terminated) {
+        const meta = callMetaRef.current.get(callId) ?? {
+          localHangup: false,
+          answered: false,
+          finalised: false,
+        };
+        let endReason: 'local_hangup' | 'remote_hangup' | 'rejected' | 'no_answer';
+        if (meta.answered) {
+          endReason = meta.localHangup ? 'local_hangup' : 'remote_hangup';
+        } else if (meta.localHangup) {
+          endReason = 'rejected';
+        } else {
+          endReason = 'no_answer';
+        }
+
         setStatus('Ready');
         void pushEvent('disconnected', {
           callId,
           consultant,
           phoneNumber: caller,
-          status: 'disconnected',
+          direction: 'inbound',
+          status: meta.answered ? 'disconnected' : meta.localHangup ? 'rejected' : 'missed',
+          endReason,
         });
+        callMetaRef.current.delete(callId);
         inboundInviteRef.current = undefined;
         setIncomingNumber('');
         setActiveCallId(undefined);
@@ -413,6 +490,12 @@ function App() {
     setActiveCallId(callId);
     log('DIAL.callId.assigned', { callId });
 
+    callMetaRef.current.set(callId, {
+      localHangup: false,
+      answered: false,
+      finalised: false,
+    });
+
     const inviter = new Inviter(userAgentRef.current, target as URI);
     log('DIAL.inviter.created', { callId, dialNumber, outgoingNumber });
     activeSessionRef.current = inviter;
@@ -438,6 +521,46 @@ function App() {
         requestOptions: {
           extraHeaders: [`X-Outgoing-Number: ${outgoingNumber}`],
         },
+        requestDelegate: {
+          onProgress: (response) => {
+            const code = response.message.statusCode;
+            const reason = response.message.reasonPhrase;
+            log('SIP.response.progress', { callId, code, reason });
+          },
+          onAccept: (response) => {
+            const code = response.message.statusCode;
+            const reason = response.message.reasonPhrase;
+            log('SIP.response.accept', { callId, code, reason });
+            const meta = callMetaRef.current.get(callId);
+            if (meta) {
+              meta.sipCode = code;
+              meta.sipReason = reason;
+            }
+          },
+          onReject: (response) => {
+            const code = response.message.statusCode;
+            const reason = response.message.reasonPhrase;
+            logError('SIP.response.reject', { callId, code, reason });
+            const meta = callMetaRef.current.get(callId);
+            if (meta) {
+              meta.sipCode = code;
+              meta.sipReason = reason;
+              meta.finalised = true;
+            }
+            void pushEvent('failed', {
+              callId,
+              consultant,
+              phoneNumber: dialNumber,
+              outgoingNumber,
+              direction: 'outbound',
+              status: 'failed',
+              sipResponseCode: code,
+              sipResponseReason: reason,
+              endReason: 'failed',
+            });
+            setStatus(`Call rejected: ${code} ${reason}`);
+          },
+        },
       });
       log('DIAL.invite.sent', { callId });
     } catch (err) {
@@ -461,6 +584,10 @@ function App() {
   const reject = async () => {
     if (!inboundInviteRef.current) return;
     log('INBOUND.reject.click');
+    if (activeCallId) {
+      const meta = callMetaRef.current.get(activeCallId);
+      if (meta) meta.localHangup = true;
+    }
     await inboundInviteRef.current.reject();
     setStatus('Ready');
   };
@@ -468,6 +595,11 @@ function App() {
   const hangup = async () => {
     const session = activeSessionRef.current ?? inboundInviteRef.current;
     if (!session) return;
+
+    if (activeCallId) {
+      const meta = callMetaRef.current.get(activeCallId);
+      if (meta) meta.localHangup = true;
+    }
 
     if (session.state === SessionState.Established) {
       log('HANGUP.bye.established');
